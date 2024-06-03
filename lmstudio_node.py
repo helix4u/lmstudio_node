@@ -1,12 +1,11 @@
 import os
-from typing import Literal, Optional, Union
+import base64
+from typing import Optional
 import random as r
-import re
-import requests
 import time
+from io import BytesIO
 from pydantic import Field
 import openai
-from invokeai.backend.util.devices import choose_torch_device, choose_precision
 from invokeai.invocation_api import (
     BaseInvocation,
     BaseInvocationOutput,
@@ -17,7 +16,8 @@ from invokeai.invocation_api import (
     OutputField,
     UIComponent
 )
-from invokeai.app.invocations.primitives import StringOutput
+from invokeai.app.invocations.primitives import ImageField
+from invokeai.app.services.image_records.image_records_common import ImageCategory, ResourceOrigin
 
 # Initialize OpenAI client by setting the API key and endpoint
 openai.api_key = "lm-studio"
@@ -27,7 +27,7 @@ openai.api_base = "http://localhost:1234/v1"
 class OpenAIAssistantInvocationOutput(BaseInvocationOutput):
     generatedPrompt: str = OutputField(description="The generated prompt")
 
-@invocation("openai_assistant", title="LM Studio API Assistant", tags=["text", "prompt", "openai", "lmstudio", "api", "assistant"], version="1.0.0")
+@invocation("openai_assistant", title="LM Studio API Assistant", tags=["text", "prompt", "openai", "lmstudio", "api", "assistant"], version="1.0.1")
 class OpenAIAssistantInvocation(BaseInvocation):
     """LM Studio API Assistant Prompt Generator node"""
 
@@ -37,38 +37,71 @@ class OpenAIAssistantInvocation(BaseInvocation):
         description="context"
     )
     prompt: str = InputField(default="")
-    max_tokens: int = InputField(default=2048, description="maximum number of tokens to generate")
+    image: Optional[ImageField] = InputField(default=None, description="The image file input")
+    max_tokens: int = InputField(default=2048, description="Maximum number of tokens to generate")
     temperature: float = InputField(default=0.8)
     seed: int = InputField(default=-1)
     trigger: int = InputField(default=0, description="Used to trigger the generator without changing values")
     # For local server
-    HOST: str = InputField(default="localhost:1234", description="host:port")
+    HOST: str = InputField(default="localhost:1234", description="Host:port")
 
-    def run(self):
+    def run(self, context: InvocationContext):
         r.seed()
         random_delay = r.randint(0, 5)
         time.sleep(3 + random_delay)
-        
+
         history = [
             {"role": "system", "content": "You are an intelligent assistant. You always provide well-reasoned answers that are both correct and helpful."},
             {"role": "user", "content": self.lmstudioContext + "\n" + self.prompt + "\n"},
         ]
 
+        if self.image:
+            try:
+                # Get the PIL image using context._services.images.get_pil_image
+                pil_image = context._services.images.get_pil_image(self.image.image_name)
+                
+                # Convert the PIL image to bytes and then to a base64 string
+                buffered = BytesIO()
+                pil_image.save(buffered, format="JPEG")
+                base64_image = base64.b64encode(buffered.getvalue()).decode("utf-8")
+                
+                history.append(
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": "What’s in this image?"},
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:image/jpeg;base64,{base64_image}"
+                                },
+                            },
+                        ],
+                    }
+                )
+            except Exception as e:
+                print(f"Couldn't process the image. Error: {e}")
+                return "Error processing the image"
+
         request = {
-            'model': "MaziyarPanahi/WizardLM-2-7B-GGUF",
+            'model': "xtuner/llava-phi-3-mini-gguf",
             'messages': history,
             'temperature': self.temperature,
             'max_tokens': self.max_tokens,
             'seed': self.seed,
         }
-        
-        response = openai.ChatCompletion.create(**request)
-        generatedPrompt = response.choices[0].message['content']
-        print(f"\nGenerated prompt: {generatedPrompt}\nSeed:{self.seed}\nTemp:{self.temperature}\n")
-        return generatedPrompt
+
+        try:
+            response = openai.ChatCompletion.create(**request)
+            generatedPrompt = response.choices[0].message['content']
+            print(f"\nGenerated prompt: {generatedPrompt}\nSeed:{self.seed}\nTemp:{self.temperature}\n")
+            return generatedPrompt
+        except Exception as e:
+            print(f"Error in API call: {e}")
+            return "Error in API call"
 
     def invoke(self, context: InvocationContext) -> OpenAIAssistantInvocationOutput:
-        generated_prompt = self.run()
+        generated_prompt = self.run(context)
         if generated_prompt is None:
             # Handle the error or set a default value
             generated_prompt = "Default value or error message"
