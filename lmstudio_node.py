@@ -27,7 +27,7 @@ openai.api_base = "http://localhost:1234/v1"
 class OpenAIAssistantInvocationOutput(BaseInvocationOutput):
     generatedPrompt: str = OutputField(description="The generated prompt")
 
-@invocation("openai_assistant", title="LM Studio API Assistant", tags=["text", "prompt", "openai", "lmstudio", "api", "assistant"], version="1.0.1")
+@invocation("openai_assistant", title="LM Studio API Assistant", tags=["text", "prompt", "openai", "lmstudio", "api", "assistant"], version="1.0.2")
 class OpenAIAssistantInvocation(BaseInvocation):
     """LM Studio API Assistant Prompt Generator node"""
 
@@ -38,6 +38,10 @@ class OpenAIAssistantInvocation(BaseInvocation):
     )
     prompt: str = InputField(default="")
     image: Optional[ImageField] = InputField(default=None, description="The image file input")
+    image_prompt: Optional[str] = InputField(
+        default="Describe this image in a very detailed and intricate way, as if you were describing it to a blind person for reasons of accessibility.",
+        description="The message for the image input"
+    )
     max_tokens: int = InputField(default=2048, description="Maximum number of tokens to generate")
     temperature: float = InputField(default=0.8)
     seed: int = InputField(default=-1)
@@ -69,7 +73,7 @@ class OpenAIAssistantInvocation(BaseInvocation):
                     {
                         "role": "user",
                         "content": [
-                            {"type": "text", "text": "What’s in this image?"},
+                            {"type": "text", "text": self.image_prompt},
                             {
                                 "type": "image_url",
                                 "image_url": {
@@ -84,7 +88,7 @@ class OpenAIAssistantInvocation(BaseInvocation):
                 return "Error processing the image"
 
         request = {
-            'model': "xtuner/llava-phi-3-mini-gguf",
+            'model': "ShadowBeast/llava-v1.6-mistral-7b-Q5_K_S-GGUF",
             'messages': history,
             'temperature': self.temperature,
             'max_tokens': self.max_tokens,
