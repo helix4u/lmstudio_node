@@ -1,74 +1,86 @@
-import os
 import base64
-from typing import Optional
 import random as r
 import time
 from io import BytesIO
-from pydantic import Field
-import openai
+from typing import Optional
+
+import requests
+
 from invokeai.invocation_api import (
     BaseInvocation,
-    BaseInvocationOutput,
+    ImageField,
+    InputField,
     InvocationContext,
     invocation,
-    invocation_output,
-    InputField,
-    OutputField,
-    UIComponent
 )
-from invokeai.app.invocations.primitives import ImageField
-from invokeai.app.services.image_records.image_records_common import ImageCategory, ResourceOrigin
+from invokeai.app.invocations.primitives import StringOutput
 
-# Initialize OpenAI client by setting the API key and endpoint
-openai.api_key = "lm-studio"
-openai.api_base = "http://localhost:1234/v1"
-
-@invocation_output("openai_assistant_output")
-class OpenAIAssistantInvocationOutput(BaseInvocationOutput):
-    generatedPrompt: str = OutputField(description="The generated prompt")
-
-@invocation("openai_assistant", title="LM Studio API Assistant", tags=["text", "prompt", "openai", "lmstudio", "api", "assistant"], version="1.0.2")
+@invocation(
+    "openai_assistant",
+    title="LM Studio API Assistant",
+    tags=["text", "prompt", "lmstudio", "api", "assistant"],
+    version="1.0.4",
+)
 class OpenAIAssistantInvocation(BaseInvocation):
     """LM Studio API Assistant Prompt Generator node"""
 
-    # Inputs
     lmstudioContext: str = InputField(
-        default="fill the details in the stable diffusion prompt the user enters. Please be as detailed as possible. Don't ask the user for information, but fill in the blanks for him. Be creative! User prompt :",
-        description="context"
+        default=(
+            "fill the details in the stable diffusion prompt the user enters. "
+            "Please be as detailed as possible. Don't ask the user for information, "
+            "but fill in the blanks for him. Be creative! User prompt :"
+        ),
+        description="Context template",
     )
-    prompt: str = InputField(default="")
-    image: Optional[ImageField] = InputField(default=None, description="The image file input")
+    prompt: str = InputField(default="", description="User prompt")
+    model: str = InputField(
+        default="MaziyarPanahi/WizardLM-2-7B-GGUF", description="Model name"
+    )
+    image: Optional[ImageField] = InputField(
+        default=None, description="Optional image input"
+    )
     image_prompt: Optional[str] = InputField(
-        default="Describe this image in a very detailed and intricate way, as if you were describing it to a blind person for reasons of accessibility.",
-        description="The message for the image input"
+        default=(
+            "Describe this image in a very detailed and intricate way, "
+            "as if you were describing it to a blind person for accessibility."
+        ),
+        description="Instruction for image description",
     )
-    max_tokens: int = InputField(default=2048, description="Maximum number of tokens to generate")
-    temperature: float = InputField(default=0.8)
-    seed: int = InputField(default=-1)
-    trigger: int = InputField(default=0, description="Used to trigger the generator without changing values")
-    # For local server
+    max_tokens: int = InputField(default=2048, description="Max tokens")
+    temperature: float = InputField(default=0.8, description="Temperature")
+    seed: int = InputField(default=-1, description="Random seed")
+    trigger: int = InputField(default=0, description="Reinvoke trigger")
     HOST: str = InputField(default="localhost:1234", description="Host:port")
 
-    def run(self, context: InvocationContext):
-        r.seed()
-        random_delay = r.randint(0, 5)
-        time.sleep(3 + random_delay)
+    def invoke(self, context: InvocationContext) -> StringOutput:
+        # Seed RNG
+        if self.seed >= 0:
+            r.seed(self.seed)
+        else:
+            r.seed()
 
+        # Optional delay
+        time.sleep(3 + r.randint(0, 5))
+
+        # Build messages
         history = [
-            {"role": "system", "content": "You are an intelligent assistant. You always provide well-reasoned answers that are both correct and helpful."},
-            {"role": "user", "content": self.lmstudioContext + "\n" + self.prompt + "\n"},
+            {
+                "role": "system",
+                "content": (
+                    "You are an intelligent assistant. Provide well-reasoned, "
+                    "correct, and helpful answers."
+                ),
+            },
+            {"role": "user", "content": f"{self.lmstudioContext}\n{self.prompt}\n"},
         ]
 
+        # Embed image if provided
         if self.image:
             try:
-                # Get the PIL image using context._services.images.get_pil_image
-                pil_image = context._services.images.get_pil_image(self.image.image_name)
-                
-                # Convert the PIL image to bytes and then to a base64 string
-                buffered = BytesIO()
-                pil_image.save(buffered, format="JPEG")
-                base64_image = base64.b64encode(buffered.getvalue()).decode("utf-8")
-                
+                pil_image = context.images.get_pil(self.image.image_name)
+                buf = BytesIO()
+                pil_image.save(buf, format="JPEG")
+                b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
                 history.append(
                     {
                         "role": "user",
@@ -76,37 +88,34 @@ class OpenAIAssistantInvocation(BaseInvocation):
                             {"type": "text", "text": self.image_prompt},
                             {
                                 "type": "image_url",
-                                "image_url": {
-                                    "url": f"data:image/jpeg;base64,{base64_image}"
-                                },
+                                "image_url": {"url": f"data:image/jpeg;base64,{b64}"},
                             },
                         ],
                     }
                 )
             except Exception as e:
-                print(f"Couldn't process the image. Error: {e}")
-                return "Error processing the image"
+                print(f"Image error: {e}")
+                return StringOutput(value="Error processing the image")
 
-        request = {
-            'model': "ShadowBeast/llava-v1.6-mistral-7b-Q5_K_S-GGUF",
-            'messages': history,
-            'temperature': self.temperature,
-            'max_tokens': self.max_tokens,
-            'seed': self.seed,
+        # Prepare request
+        url = f"http://{self.HOST}/v1/chat/completions"
+        headers = {"Content-Type": "application/json"}
+        payload = {
+            "model": self.model,
+            "messages": history,
+            "temperature": self.temperature,
+            "max_tokens": self.max_tokens,
+            "seed": self.seed,
         }
 
+        # Send HTTP request directly
         try:
-            response = openai.ChatCompletion.create(**request)
-            generatedPrompt = response.choices[0].message['content']
-            print(f"\nGenerated prompt: {generatedPrompt}\nSeed:{self.seed}\nTemp:{self.temperature}\n")
-            return generatedPrompt
+            resp = requests.post(url, headers=headers, json=payload, timeout=60)
+            resp.raise_for_status()
+            data = resp.json()
+            prompt = data["choices"][0]["message"]["content"]
         except Exception as e:
-            print(f"Error in API call: {e}")
-            return "Error in API call"
+            print(f"HTTP error: {e}")
+            prompt = "Error in API call"
 
-    def invoke(self, context: InvocationContext) -> OpenAIAssistantInvocationOutput:
-        generated_prompt = self.run(context)
-        if generated_prompt is None:
-            # Handle the error or set a default value
-            generated_prompt = "Default value or error message"
-        return OpenAIAssistantInvocationOutput(generatedPrompt=generated_prompt)
+        return StringOutput(value=prompt)
